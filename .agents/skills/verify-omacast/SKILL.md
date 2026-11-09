@@ -28,8 +28,8 @@ $VO --help
 The shell is already running. Load the current code into it:
 
 1. The code is in `~/Projects/oma-cast`. The plugin folder `~/.config/omarchy/plugins/typecraft.omacast` is a symlink to it.
-2. After you edit QML or JS, run `omacast reload`. Quickshell caches every QML file it read, so a plain save does not load new code.
-3. Wait until `omarchy-shell omacast ping` prints `ok`.
+2. After you edit QML or JS, run `vo reload`. Quickshell caches every QML file it read, so a plain save does not load new code.
+3. `vo reload` waits until the new plugin instance is ready. The old instance answers for a moment after `omacast reload` and drops what it gets, so do not use `omacast reload` alone before a drive.
 4. Read the shell log for QML errors: `qs log -n -p "$OMARCHY_PATH/shell" -t 50 | grep -i omacast`. "Type X unavailable" means a QML error. The cause is on the next line.
 
 If `omacast reload` refuses ("for development checkouts"), the plugin folder is a real folder, not a symlink. Then run `omarchy restart shell`. This restart redraws the bar, so tell the user.

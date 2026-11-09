@@ -23,6 +23,7 @@ usage() {
   cat <<'USAGE'
 vo start <name>        Start a run; evidence goes to ~/.local/state/omacast-verify/<time>-<name>/
 vo doctor              Read-only: shell, plugin, IPC, backend, file index, checkout path
+vo reload              omacast reload, then wait until the new plugin instance is ready
 vo fixture             Create ~/omacast-verify/ with known files for file search
 vo open [query]        Show the launcher with a query (empty = root), wait until open
 vo search <query>      Print the sections the launcher shows for a query (same backend call)
@@ -64,21 +65,50 @@ cmd_doctor() {
 
 cmd_fixture() {
   mkdir -p "$fixture/Reports"
-  printf 'omacast verify fixture\n' >"$fixture/zebrafish-notes.md"
+  printf '# Zebrafish notes\n\nomacast verify fixture.\nLine three of the preview.\n' >"$fixture/zebrafish-notes.md"
+  magick -size 480x320 gradient:'#3b82f6-#f59e0b' -gravity center -pointsize 40 -fill white \
+    -annotate 0 'zebrafish' "$fixture/zebrafish-photo.png"
   printf 'omacast verify fixture\n' >"$fixture/Reports/zebrafish-budget.csv"
   touch -d '2025-03-14 12:00' "$fixture/Reports/zebrafish-budget.csv"
-  echo "$fixture: zebrafish-notes.md (now), Reports/zebrafish-budget.csv (14 Mar 2025)"
+  echo "$fixture: zebrafish-notes.md and zebrafish-photo.png (now), Reports/zebrafish-budget.csv (14 Mar 2025)"
+}
+
+ready() { # backend loaded with its commands, so the first answer is the real one
+  omarchy-shell omacast call system.info '{}' 2>/dev/null | jq -e '.ok and .data.ready and .data.candidates > 0' >/dev/null
+}
+
+# omacast reload, then wait until the NEW plugin instance answers and is
+# ready: the old one keeps answering for a moment and drops what it gets.
+cmd_reload() {
+  local before
+  before=$(omarchy-shell omacast call system.info '{}' 2>/dev/null | jq -r '.data.uptimeMs // 0')
+  omacast reload || die "omacast reload failed"
+  newer() {
+    omarchy-shell omacast call system.info '{}' 2>/dev/null |
+      jq -e --argjson b "$before" '.ok and .data.ready and .data.candidates > 0 and .data.uptimeMs < $b' >/dev/null
+  }
+  wait_for 150 newer || die "the reloaded plugin did not become ready"
+  sleep 0.3
+  echo "reloaded"
 }
 
 cmd_open() {
   local query=${1:-}
+  wait_for 100 ready || die "omacast backend is not ready (see vo doctor)"
   local payload
   payload=$(jq -cn --arg q "$query" '{query: $q}')
+  # Right after `omacast reload` a summon can arrive before the window is
+  # ready; ask again once.
   omarchy-shell shell summon typecraft.omacast "$payload" >/dev/null
-  wait_for 30 is_open || die "launcher did not open"
+  if ! wait_for 15 is_open; then
+    omarchy-shell shell summon typecraft.omacast "$payload" >/dev/null
+    wait_for 30 is_open || die "launcher did not open"
+  fi
   # The file list loads when the launcher opens; let it land, and let the
   # layer take keyboard focus before any key is sent (CLAUDE.md, ~25-40 ms).
   sleep 0.5
+  # The file list loads on the first open; wait for it before keys.
+  wait_for 30 bash -c "omarchy-shell omacast call files.status '{}' | jq -e '.data.refreshedAt != null' >/dev/null" || true
 }
 
 cmd_search() {
@@ -90,8 +120,15 @@ cmd_search() {
 
 cmd_key() {
   is_open || die "launcher is not open; keys would go to the window underneath"
-  local k
+  local k sel
   for k in "$@"; do
+    if [[ ${k,,} == return || ${k,,} == *+return ]]; then
+      sel=$(omarchy-shell omacast selected 2>/dev/null)
+      case $sel in
+        fallback:*|builtin:google-search|builtin:duckduckgo-search)
+          die "refusing $k: the selected row is a web search ($sel)" ;;
+      esac
+    fi
     if [[ $k == *+* ]]; then
       local mods=${k%+*} key=${k##*+} args=()
       IFS=+ read -ra ms <<<"$mods"
@@ -160,6 +197,7 @@ cmd_clean() {
 case "${1:-}" in
   start) shift; cmd_start "$@" ;;
   doctor) cmd_doctor ;;
+  reload) cmd_reload ;;
   fixture) cmd_fixture ;;
   open) shift; cmd_open "$@" ;;
   search) shift; cmd_search "$@" ;;
