@@ -114,6 +114,11 @@ Item {
       return root.opened ? "true" : "false"
     }
 
+    // The id of the selected row, or "" (for scripted checks).
+    function selected(): string {
+      return root.opened && launcher.selectedRow ? launcher.selectedRow.itemId : ""
+    }
+
     function ping(): string {
       return "ok"
     }
