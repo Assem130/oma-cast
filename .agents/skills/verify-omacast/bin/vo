@@ -1,0 +1,174 @@
+#!/bin/bash
+# vo: drive the live omacast launcher for verification. See ../SKILL.md.
+set -uo pipefail
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}/omacast-verify"
+fixture="$HOME/omacast-verify"
+run_file="$state/current-run"
+
+die() { echo "vo: $*" >&2; exit 1; }
+run_dir() {
+  [[ -f $run_file ]] || die "no run; start one with: vo start <name>"
+  cat "$run_file"
+}
+is_open() { [[ $(omarchy-shell omacast isOpen 2>/dev/null) == true ]]; }
+wait_for() { # wait_for <tries> <command...>: poll every 0.1 s
+  local n=$1; shift
+  for ((i = 0; i < n; i++)); do "$@" && return 0; sleep 0.1; done
+  return 1
+}
+addresses() { hyprctl clients -j | jq -r '.[].address' | sort; }
+
+usage() {
+  cat <<'USAGE'
+vo start <name>        Start a run; evidence goes to ~/.local/state/omacast-verify/<time>-<name>/
+vo doctor              Read-only: shell, plugin, IPC, backend, file index, checkout path
+vo fixture             Create ~/omacast-verify/ with known files for file search
+vo open [query]        Show the launcher with a query (empty = root), wait until open
+vo search <query>      Print the sections the launcher shows for a query (same backend call)
+vo key <key>...        Send keys to the open launcher (wtype names: Return, Escape, Down, ctrl+k ...)
+vo type <text>         Type text into the open launcher
+vo shot <name>         Screenshot the launcher's monitor into the run dir (also a centre crop)
+vo hide                Hide the launcher
+vo windows-before      Remember the open windows, so vo new-windows and vo clean know what we started
+vo new-windows         Print windows opened since windows-before as JSON (class, title, address)
+vo clean               Hide, close windows this run opened, delete ~/omacast-verify/. Keeps evidence.
+USAGE
+}
+
+cmd_start() {
+  local name=${1:-run}
+  local dir="$state/$(date +%Y%m%d-%H%M%S)-$name"
+  mkdir -p "$dir" && printf '%s\n' "$dir" >"$run_file"
+  echo "$dir"
+}
+
+cmd_doctor() {
+  local bad=0
+  check() { local l=$1; shift; if "$@" >/dev/null 2>&1; then echo "  ok    $l"; else echo "  FAIL  $l"; bad=1; fi; }
+  echo "vo doctor"
+  check "Hyprland answers" hyprctl version
+  check "omarchy-shell answers" omarchy-shell shell ping
+  check "omacast answers IPC" bash -c '[[ $(omarchy-shell omacast ping) == ok ]]'
+  check "backend health ping" bash -c "omarchy-shell omacast call system.healthPing '{}' | grep -q '\"ok\":true'"
+  check "file index method present (file-search build is loaded)" bash -c "omarchy-shell omacast call files.status '{}' | grep -q '\"ok\":true'"
+  local link="" l
+  for l in "$HOME"/.config/omarchy/plugins/typecraft.omacast "$HOME"/.config/omarchy/plugins/typecraft.omacast.dev-*; do
+    [[ -e $l ]] && link=$(readlink -f "$l")
+  done
+  echo "  info  plugin code: ${link:-not found}"
+  echo "  info  branch: $(git -C "${link:-/nonexistent}" branch --show-current 2>/dev/null || echo '?')"
+  echo "  info  files: $(omarchy-shell omacast call files.status '{}' 2>/dev/null)"
+  return $bad
+}
+
+cmd_fixture() {
+  mkdir -p "$fixture/Reports"
+  printf 'omacast verify fixture\n' >"$fixture/zebrafish-notes.md"
+  printf 'omacast verify fixture\n' >"$fixture/Reports/zebrafish-budget.csv"
+  touch -d '2025-03-14 12:00' "$fixture/Reports/zebrafish-budget.csv"
+  echo "$fixture: zebrafish-notes.md (now), Reports/zebrafish-budget.csv (14 Mar 2025)"
+}
+
+cmd_open() {
+  local query=${1:-}
+  local payload
+  payload=$(jq -cn --arg q "$query" '{query: $q}')
+  omarchy-shell shell summon typecraft.omacast "$payload" >/dev/null
+  wait_for 30 is_open || die "launcher did not open"
+  # The file list loads when the launcher opens; let it land, and let the
+  # layer take keyboard focus before any key is sent (CLAUDE.md, ~25-40 ms).
+  sleep 0.5
+}
+
+cmd_search() {
+  local data
+  data=$(jq -cn --arg q "${1:-}" '{query: $q}')
+  omarchy-shell omacast call rootSearch.search "$data" |
+    jq -r 'if .ok then (.data[] | "## \(.title)", (.rows[] | "  \(.title) | \(.subtitle) | \(.typeLabel) | \(.id)")) else "ERROR \(.error)" end'
+}
+
+cmd_key() {
+  is_open || die "launcher is not open; keys would go to the window underneath"
+  local k
+  for k in "$@"; do
+    if [[ $k == *+* ]]; then
+      local mods=${k%+*} key=${k##*+} args=()
+      IFS=+ read -ra ms <<<"$mods"
+      for m in "${ms[@]}"; do args+=(-M "$m"); done
+      args+=(-k "$key")
+      for m in "${ms[@]}"; do args+=(-m "$m"); done
+      wtype "${args[@]}"
+    else
+      wtype -k "$k"
+    fi
+    sleep 0.15
+  done
+}
+
+cmd_type() {
+  is_open || die "launcher is not open; text would go to the window underneath"
+  wtype -- "$1"
+  sleep 0.3
+}
+
+cmd_shot() {
+  local dir name=${1:?name}
+  dir=$(run_dir)
+  local mon geo
+  mon=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+  grim -o "$mon" "$dir/$name.png" || die "grim failed"
+  geo=$(magick identify -format '%w %h' "$dir/$name.png")
+  read -r w h <<<"$geo"
+  magick "$dir/$name.png" -gravity center -crop "$((w * 62 / 100))x$((h * 72 / 100))+0+0" +repage "$dir/$name-crop.png"
+  echo "$dir/$name-crop.png"
+}
+
+cmd_windows_before() { addresses >"$(run_dir)/windows-before.txt"; }
+
+cmd_new_windows() {
+  local dir; dir=$(run_dir)
+  [[ -f $dir/windows-before.txt ]] || die "run vo windows-before first"
+  hyprctl clients -j | jq -c --rawfile before "$dir/windows-before.txt" \
+    '[.[] | select(.address as $a | ($before | split("\n") | index($a)) | not) | {class, title, address}]'
+}
+
+cmd_clean() {
+  is_open && omarchy-shell omacast hide >/dev/null
+  if [[ -f $run_file ]]; then
+    local dir; dir=$(cat "$run_file")
+    if [[ -f $dir/windows-before.txt ]]; then
+      cmd_new_windows | jq -r '.[].address' | while read -r a; do
+        [[ -n $a ]] && hyprctl dispatch "hl.dsp.window.close({ window = \"address:$a\" })" >/dev/null 2>&1 ||
+          hyprctl dispatch closewindow "address:$a" >/dev/null 2>&1
+        echo "closed $a"
+      done
+    fi
+    echo "evidence kept in $dir"
+  fi
+  # Apps opened from the fixture can outlive their window (nautilus --select).
+  # Their command line names the fixture path, so they are ours.
+  local pid
+  for pid in $(pgrep -f -- "$fixture/" || true); do
+    [[ $pid == "$$" ]] && continue
+    kill "$pid" 2>/dev/null && echo "stopped $(ps -o comm= -p "$pid" 2>/dev/null || echo "pid $pid")"
+  done
+  [[ -d $fixture ]] && rm -r -- "$fixture" && echo "removed $fixture"
+  return 0
+}
+
+case "${1:-}" in
+  start) shift; cmd_start "$@" ;;
+  doctor) cmd_doctor ;;
+  fixture) cmd_fixture ;;
+  open) shift; cmd_open "$@" ;;
+  search) shift; cmd_search "$@" ;;
+  key) shift; cmd_key "$@" ;;
+  type) shift; cmd_type "$@" ;;
+  shot) shift; cmd_shot "$@" ;;
+  hide) omarchy-shell omacast hide >/dev/null ;;
+  windows-before) cmd_windows_before ;;
+  new-windows) cmd_new_windows ;;
+  clean) cmd_clean ;;
+  *) usage; [[ -z ${1:-} || $1 == -h || $1 == --help ]] ;;
+esac
