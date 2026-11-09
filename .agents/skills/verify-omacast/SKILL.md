@@ -34,7 +34,7 @@ The shell is already running. Load the current code into it:
 
 If `omacast reload` refuses ("for development checkouts"), the plugin folder is a real folder, not a symlink. Then run `omarchy restart shell`. This restart redraws the bar, so tell the user.
 
-`omacast reload` renames the plugin link to `typecraft.omacast.dev-<number>`. `omarchy plugin update` needs the plain name. When the work is done, restore it with `~/Projects/oma-cast/bin/omacast install`.
+`omacast reload` renames the plugin link to `typecraft.omacast.dev-<number>`. `omarchy plugin update` needs the plain name. When the work is done, remove the `.dev-*` link, restore the plain link with `~/Projects/oma-cast/bin/omacast install`, and run `omarchy restart shell`. The plain path was loaded before, so without the restart the shell serves its old cached code for that path. Check with `vo doctor` and one drive.
 
 Teardown: there is nothing to stop. Run `vo clean`.
 
